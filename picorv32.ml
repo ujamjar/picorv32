@@ -79,19 +79,28 @@ let pmux1ht x =
 
 let cbool x = if x then vdd else gnd
 
-let clock = input "clk" 1
-let resetn = input "resetn" 1
+module type Regs = sig
+  val r_spec : t -> Signal.Types.register
+  val reg : c:t -> e:t -> d:t -> t
+end
 
-let r_spec c = 
-  Signal.Types.({ r_async with
-    reg_clock = clock;
-    reg_reset = resetn;
-    reg_reset_level = gnd;
-    reg_reset_value = c }) 
+module Regs (X : sig
+  val clk : t
+  val resetn : t
+end) = struct
 
-let reg ~c ~e ~d = reg (r_spec c) e d
-let reg_fb ~c ~e ~w f = reg_fb (r_spec c) e w f
-let g_reg ~c ~e ~n = Signal.Guarded.g_reg (r_spec c) e n
+  let r_spec c = 
+    Signal.Types.({ r_async with
+      reg_clock = X.clk;
+      reg_reset = X.resetn;
+      reg_reset_level = gnd;
+      reg_reset_value = c }) 
+
+  let reg ~c ~e ~d = reg (r_spec c) e d
+  let reg_fb ~c ~e ~w f = reg_fb (r_spec c) e w f
+  let g_reg ~c ~e ~n = Signal.Guarded.g_reg (r_spec c) e n
+
+end
 
 open Options
 
@@ -112,6 +121,7 @@ let with_pcpi = enable_pcpi || enable_mul
 module Decoder = struct
 
   module I = interface
+    clk[1] resetn[1]
     mem_do_rinst[1] mem_done[1] 
     mem_rdata_latched[32] mem_rdata_q[32]
     decoder_trigger[1] decoder_trigger_q[1] decoder_pseudo_trigger[1]
@@ -125,12 +135,15 @@ module Decoder = struct
   end
 
   let decoder
+    regs
     mem_rdata_q mem_rdata_latched 
     mem_do_rinst mem_done
     decoder_trigger decoder_pseudo_trigger
     = 
     let open Instr in
     let open Is in
+    let module Regs = (val regs : Regs) in
+    let open Regs in
 
     let enable_irq = cbool Options.enable_irq in
     let enable_irq_qregs = cbool Options.enable_irq_qregs in
@@ -302,6 +315,8 @@ module Decoder = struct
   let f i = 
 
     let open I in
+    let module Regs = Regs(struct let clk=i.clk let resetn=i.resetn end) in
+    let open Regs in
       
     let enable_irq = cbool Options.enable_irq in
     let enable_irq_qregs = cbool Options.enable_irq_qregs in
@@ -311,6 +326,7 @@ module Decoder = struct
     let r2 = reg (i.decoder_trigger &: ~: (i.decoder_pseudo_trigger)) in
 
     let instr, is = decoder 
+      (module Regs)
       i.mem_rdata_q i.mem_rdata_latched 
       i.mem_do_rinst i.mem_done
       i.decoder_trigger i.decoder_pseudo_trigger
@@ -524,6 +540,7 @@ end
 module Memif = struct
 
   module I = interface
+    clk[1] resetn[1]
     reg_op1[32] reg_op2[32] next_pc[32]
     mem_ready[1] mem_do_rinst[1] mem_rdata[32]
     mem_wordsize[2] mem_do_prefetch[1] mem_do_rdata[1] mem_do_wdata[1]
@@ -540,6 +557,8 @@ module Memif = struct
 
   let f i = 
     let open I in
+    let module Regs = Regs(struct let clk=i.clk let resetn=i.resetn end) in
+    let open Regs in
 
     let latched_mem_rdata = cbool Options.latched_mem_rdata in
     let is, sm, next = 
@@ -556,9 +575,9 @@ module Memif = struct
       (mem_state_3 &: i.mem_do_rinst)
     in
 
-    let mem_la_write = resetn &: mem_state_0 &: i.mem_do_wdata in
+    let mem_la_write = i.resetn &: mem_state_0 &: i.mem_do_wdata in
     let mem_la_read = 
-      resetn &: mem_state_0 &: 
+      i.resetn &: mem_state_0 &: 
       (i.mem_do_rinst |: i.mem_do_prefetch |: i.mem_do_rdata)
     in
     let mem_la_addr = 
@@ -658,6 +677,7 @@ end
 module Pcpi = struct
 
   module I = interface
+    clk[1] resetn[1]
     valid[1] insn[32] rs1[32] rs2[32]
   end
 
@@ -674,9 +694,11 @@ module Mul = struct
   
   let f i = 
     let open I in
+    let module Regs = Regs(struct let clk=i.clk let resetn=i.resetn end) in
+    let open Regs in
 
     let sel = 
-      resetn &: i.valid &: (i.insn.[6:0] ==:. 0b0110011) &: (i.insn.[31:25] ==:. 0b0000001)
+      i.resetn &: i.valid &: (i.insn.[6:0] ==:. 0b0110011) &: (i.insn.[31:25] ==:. 0b0000001)
     in
     let mul    = reg ~c:gnd ~e:vdd ~d:(sel &: (i.insn.[14:12] ==:. 0)) in
     let mulh   = reg ~c:gnd ~e:vdd ~d:(sel &: (i.insn.[14:12] ==:. 1)) in
@@ -811,6 +833,7 @@ end
 module Rf = struct
 
   module I = interface
+    clk[1] resetn[1]
     wr[1] wa[regindex_bits] d[32]
     ra1[regindex_bits] ra2[regindex_bits]
   end
@@ -821,6 +844,9 @@ module Rf = struct
 
   let f i = 
     let open I in
+    let module Regs = Regs(struct let clk=i.clk let resetn=i.resetn end) in
+    let open Regs in
+
     let wen = binary_to_onehot i.wa in
     let regs = 
       Array.to_list @@
@@ -854,6 +880,7 @@ end
 module Control = struct
 
   module I = interface
+    clk[1] resetn[1]
     instr[Instr.n] is[Is.n]
     mem_rdata_word[32] mem_done[1]
     pcpi_int_ready[1] pcpi_int_wait[1]
@@ -876,6 +903,8 @@ module Control = struct
   let f i = 
     let open I in
     let open O in
+    let module Regs = Regs(struct let clk=i.clk let resetn=i.resetn end) in
+    let open Regs in
 
     let enable_pcpi = cbool Options.enable_pcpi in
     let enable_mul = cbool Options.enable_mul in
@@ -925,6 +954,8 @@ module Control = struct
     let latched_rd = g_reg ~c:(zero regindex_bits) ~e:vdd ~n:regindex_bits in
     let rf_wr, rf_d = Signal.Guarded.(g_wire gnd, g_wire (zero 32)) in
     let rfi = Rf.I.({
+      clk = i.clk;
+      resetn = i.resetn;
       wa = latched_rd#q;
       wr = rf_wr#q;
       d = rf_d#q;
@@ -1296,14 +1327,14 @@ module Test = struct
     module Y = Interface.Circ(X.I)(X.O)
     module Y' = Interface.Circ(X.I')(X.O')
 
-    let write name = 
-      let name = "opicorv32_" ^ name in
+    let write name' = 
+      let name = "opicorv32_" ^ name' in
       let f = open_out (name ^ ".v") in
       let circ = Y.make name X.f in
       Rtl.Verilog.write (output_string f) circ;
       close_out f;
 
-      let name = "opicorv32_" ^ name ^ "_wrap" in
+      let name = "opicorv32_" ^ name' ^ "_wrap" in
       let f = open_out (name ^ ".v") in
       let circ = Y'.make name X.wrap in
       Rtl.Verilog.write (output_string f) circ;
