@@ -20,6 +20,12 @@
 `timescale 1 ns / 1 ps
 // `define DEBUG
 
+//`define FULL_CASE (* full_case *)
+//`define PARALLEL_CASE (* parallel_case *)
+//`define PARALLEL_FULL_CASE (* parallel_case, full_case *)
+`define FULL_CASE 
+`define PARALLEL_CASE 
+`define PARALLEL_FULL_CASE 
 
 /***************************************************************
  * picorv32
@@ -137,7 +143,7 @@ module picorv32 #(
 		pcpi_int_wait  = |{ENABLE_PCPI && pcpi_wait,  ENABLE_MUL && pcpi_mul_wait};
 		pcpi_int_ready = |{ENABLE_PCPI && pcpi_ready, ENABLE_MUL && pcpi_mul_ready};
 
-		(* parallel_case *)
+		`PARALLEL_CASE 
 		case (1'b1)
 			ENABLE_PCPI && pcpi_ready: begin
 				pcpi_int_wr = pcpi_wr;
@@ -173,7 +179,7 @@ module picorv32 #(
 	assign mem_rdata_latched = ((mem_valid && mem_ready) || LATCHED_MEM_RDATA) ? mem_rdata : mem_rdata_q;
 
 	always @* begin
-		(* full_case *)
+		`FULL_CASE 
 		case (mem_wordsize)
 			0: begin
 				mem_la_wdata = reg_op2;
@@ -466,7 +472,7 @@ module picorv32 #(
 				mem_rdata_q[14:12] == 3'b101 && mem_rdata_q[31:25] == 7'b0100000
 			};
 
-			(* parallel_case *)
+			`PARALLEL_CASE
 			case (1'b1)
 				instr_jal:
 					decoded_imm <= decoded_imm_uj;
@@ -524,7 +530,7 @@ module picorv32 #(
 
 	always @* begin
 		alu_out_0 = 'bx;
-		(* parallel_case, full_case *)
+		`PARALLEL_FULL_CASE
 		case (1'b1)
 			instr_beq:
 				alu_out_0 = reg_op1 == reg_op2;
@@ -541,7 +547,7 @@ module picorv32 #(
 		endcase
 
 		alu_out = 'bx;
-		(* parallel_case, full_case *)
+		`PARALLEL_FULL_CASE
 		case (1'b1)
 			is_lui_auipc_jal_jalr_addi_add:
 				alu_out = reg_op1 + reg_op2;
@@ -617,7 +623,7 @@ module picorv32 #(
 			timer <= 0;
 			cpu_state <= cpu_state_fetch;
 		end else
-		(* parallel_case, full_case *)
+		`PARALLEL_FULL_CASE
 		case (cpu_state)
 			cpu_state_trap: begin
 				trap <= 1;
@@ -748,7 +754,7 @@ module picorv32 #(
 					end
 				end else
 				if (is_rdcycle_rdcycleh_rdinstr_rdinstrh) begin
-					(* parallel_case, full_case *)
+          `PARALLEL_FULL_CASE
 					case (1'b1)
 						instr_rdcycle:
 							reg_out <= count_cycle[31:0];
@@ -894,7 +900,7 @@ module picorv32 #(
 					mem_do_rinst <= mem_do_prefetch;
 					cpu_state <= cpu_state_fetch;
 				end else if (reg_sh >= 4) begin
-					(* parallel_case, full_case *)
+          `PARALLEL_FULL_CASE
 					case (1'b1)
 						instr_slli || instr_sll: reg_op1 <= reg_op1 << 4;
 						instr_srli || instr_srl: reg_op1 <= reg_op1 >> 4;
@@ -902,7 +908,7 @@ module picorv32 #(
 					endcase
 					reg_sh <= reg_sh - 4;
 				end else begin
-					(* parallel_case, full_case *)
+          `PARALLEL_FULL_CASE
 					case (1'b1)
 						instr_slli || instr_sll: reg_op1 <= reg_op1 << 1;
 						instr_srli || instr_srl: reg_op1 <= reg_op1 >> 1;
@@ -914,7 +920,7 @@ module picorv32 #(
 			cpu_state_stmem: begin
 				if (!mem_do_prefetch || mem_done) begin
 					if (!mem_do_wdata) begin
-						(* parallel_case, full_case *)
+            `PARALLEL_FULL_CASE
 						case (1'b1)
 							instr_sb: mem_wordsize <= 2;
 							instr_sh: mem_wordsize <= 1;
@@ -934,7 +940,7 @@ module picorv32 #(
 				latched_store <= 1;
 				if (!mem_do_prefetch || mem_done) begin
 					if (!mem_do_rdata) begin
-						(* parallel_case, full_case *)
+            `PARALLEL_FULL_CASE
 						case (1'b1)
 							instr_lb || instr_lbu: mem_wordsize <= 2;
 							instr_lh || instr_lhu: mem_wordsize <= 1;
@@ -947,7 +953,7 @@ module picorv32 #(
 						set_mem_do_rdata = 1;
 					end
 					if (!mem_do_prefetch && mem_done) begin
-						(* parallel_case, full_case *)
+            `PARALLEL_FULL_CASE
 						case (1'b1)
 							latched_is_lu: reg_out <= mem_rdata_word;
 							latched_is_lh: reg_out <= $signed(mem_rdata_word[15:0]);

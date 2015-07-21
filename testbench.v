@@ -18,8 +18,8 @@ module testbench;
 
 	always @* begin
 		irq = 0;
-		irq[4] = &uut.picorv32_core.count_cycle[12:0];
-		irq[5] = &uut.picorv32_core.count_cycle[15:0];
+		irq[4] = &uut.picorv32_core.control.count_cycle[12:0];
+		irq[5] = &uut.picorv32_core.control.count_cycle[15:0];
 	end
 
 	always #5 clk = ~clk;

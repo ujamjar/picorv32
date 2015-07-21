@@ -2,54 +2,66 @@
 TEST_OBJS = $(addsuffix .o,$(basename $(wildcard tests/*.S)))
 FIRMWARE_OBJS = firmware/start.o firmware/irq.o firmware/print.o firmware/sieve.o firmware/multest.o firmware/stats.o
 
+#VVP=vvp -N
+VVP=vvp -n
+
 test: testbench.exe firmware/firmware.hex
-	vvp -N testbench.exe
+	$(VVP) testbench.exe
 
 test_sp: testbench_sp.exe firmware/firmware.hex
-	vvp -N testbench_sp.exe
+	$(VVP) testbench_sp.exe
 
 test_axi: testbench_axi.exe firmware/firmware.hex
-	vvp -N testbench_axi.exe
+	$(VVP) testbench_axi.exe
 
-testbench.exe: testbench.v picorv32.v
-	iverilog -o testbench.exe testbench.v picorv32.v
+OPICORV32=opicorv32_alu.v opicorv32_decoder.v opicorv32_memif.v
+PICORV32=$(OPICORV32) picorv32_2.v
+
+testbench.exe: testbench.v $(PICORV32)
+	iverilog -Wall -o testbench.exe testbench.v $(PICORV32)
 	chmod -x testbench.exe
 
-testbench_sp.exe: testbench.v picorv32.v
-	iverilog -o testbench_sp.exe -DSP_TEST testbench.v picorv32.v
+testbench_sp.exe: testbench.v $(PICORV32)
+	iverilog -o testbench_sp.exe -DSP_TEST testbench.v $(PICORV32)
 	chmod -x testbench_sp.exe
 
-testbench_axi.exe: testbench.v picorv32.v
-	iverilog -o testbench_axi.exe -DAXI_TEST testbench.v picorv32.v
+testbench_axi.exe: testbench.v $(PICORV32)
+	iverilog -o testbench_axi.exe -DAXI_TEST testbench.v $(PICORV32)
 	chmod -x testbench_axi.exe
 
 firmware/firmware.hex: firmware/firmware.bin firmware/makehex.py
 	python3 firmware/makehex.py $< > $@
 
+RV=riscv64-unknown-elf-
+RVGCC=$(RV)gcc -m32
+#RV=riscv32-unknown-elf-
+#RVGCC=$(RV)gcc
+RVOBJCOPY=$(RV)objcopy
+
 firmware/firmware.bin: firmware/firmware.elf
-	riscv64-unknown-elf-objcopy -O binary $< $@
+	$(RVOBJCOPY) -O binary $< $@
 	chmod -x $@
 
 firmware/firmware.elf: $(FIRMWARE_OBJS) $(TEST_OBJS) firmware/sections.lds
-	riscv64-unknown-elf-gcc -Os -m32 -ffreestanding -nostdlib -o $@ \
+	$(RVGCC) -Os -ffreestanding -nostdlib -o $@ \
 		-Wl,-Bstatic,-T,firmware/sections.lds,-Map,firmware/firmware.map,--strip-debug \
 		$(FIRMWARE_OBJS) $(TEST_OBJS) -lgcc
 	chmod -x $@
 
 firmware/start.o: firmware/start.S
-	riscv64-unknown-elf-gcc -c -m32 -o $@ $<
+	$(RVGCC) -c -o $@ $<
 
 firmware/%.o: firmware/%.c
-	riscv64-unknown-elf-gcc -c -m32 -march=RV32I -Os -ffreestanding -nostdlib -o $@ $<
+	$(RVGCC) -c -march=RV32I -Os -ffreestanding -nostdlib -o $@ $<
 
 tests/%.o: tests/%.S tests/riscv_test.h tests/test_macros.h
-	riscv64-unknown-elf-gcc -c -m32 -o $@ -DTEST_FUNC_NAME=$(notdir $(basename $<)) \
+	$(RVGCC) -c -o $@ -DTEST_FUNC_NAME=$(notdir $(basename $<)) \
 		-DTEST_FUNC_TXT='"$(notdir $(basename $<))"' -DTEST_FUNC_RET=$(notdir $(basename $<))_ret $<
 
 clean:
 	rm -vrf $(FIRMWARE_OBJS) $(TEST_OBJS) \
 		firmware/firmware.{elf,bin,hex,map} \
-		testbench{,_sp,_axi}.exe testbench.vcd
+		testbench{,_sp,_axi}.exe testbench.exe testbench.vcd
 
 .PHONY: test test_sp test_axi clean
 
