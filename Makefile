@@ -14,8 +14,9 @@ test_sp: testbench_sp.exe firmware/firmware.hex
 test_axi: testbench_axi.exe firmware/firmware.hex
 	$(VVP) testbench_axi.exe
 
-OPICORV32=opicorv32_alu.v opicorv32_decoder.v opicorv32_memif.v
-PICORV32=$(OPICORV32) picorv32_2.v
+OPICORV32=opicorv32_alu.v opicorv32_instruction_decoder.v opicorv32_memif.v opicorv32_pcpi_if.v opicorv32_control.v opicorv32_rv32.v
+OPICORV32_WRAP=opicorv32_alu_wrap.v opicorv32_instruction_decoder_wrap.v opicorv32_memif_wrap.v opicorv32_pcpi_if_wrap.v opicorv32_control_wrap.v
+PICORV32=$(OPICORV32) $(OPICORV32_WRAP) picorv32_2.v
 
 testbench.exe: testbench.v $(PICORV32)
 	iverilog -Wall -o testbench.exe testbench.v $(PICORV32)

@@ -124,13 +124,13 @@ module Decoder = struct
     clk[1] resetn[1]
     mem_do_rinst[1] mem_done[1] 
     mem_rdata_latched[32] mem_rdata_q[32]
-    decoder_trigger[1] decoder_trigger_q[1] decoder_pseudo_trigger[1]
+    decoder_trigger[1] (*decoder_trigger_q[1]*) decoder_pseudo_trigger[1]
   end
 
   module O = interface
     instr[Instr.n] is[Is.n]
     pcpi_insn[32] 
-    decoded_rd[32] decoded_rs1[32] decoded_rs2[32]
+    decoded_rd[regindex_bits] decoded_rs1[regindex_bits] decoded_rs2[regindex_bits]
     decoded_imm[32] decoded_imm_uj[32]
   end
 
@@ -390,7 +390,9 @@ module Decoder = struct
       decoded_imm; decoded_imm_uj;
     })
 
-  module I' = I
+  module I' = interface
+    (i : I) decoder_trigger_q[1]
+  end
   module O' = interface
     instr_lui[1] instr_auipc[1] instr_jal[1] instr_jalr[1]
     instr_beq[1] instr_bne[1] instr_blt[1] instr_bge[1] instr_bltu[1] instr_bgeu[1]
@@ -414,12 +416,11 @@ module Decoder = struct
     is_rdcycle_rdcycleh_rdinstr_rdinstrh[1]
 
     pcpi_insn[32] 
-    decoded_rd[32] decoded_rs1[32] decoded_rs2[32]
+    decoded_rd[regindex_bits] decoded_rs1[regindex_bits] decoded_rs2[regindex_bits]
     decoded_imm[32] decoded_imm_uj[32]
   end
 
-  (* convert O -> O' so the verilog/ml interfaces are the same *)
-  let conv_o o = 
+  let convo o = 
     let instr_a = List.map (fun x -> Instr.cname x, Instr.sel o.O.instr x) Instr.list in
     let is_a = List.map (fun x -> Is.cname x, Is.sel o.O.is x) Is.list in
     let other_a = O.(to_list @@ map2 (fun (n,_) s -> n,s) t o) in
@@ -428,35 +429,20 @@ module Decoder = struct
       try List.assoc n is_a with _ ->
       List.assoc n other_a) t)
 
+  let convi i' = i'.I'.i
+
   let generics = 
     [
       "ENABLE_COUNTERS", Signal.Types.ParamInt(1);
       "ENABLE_REGS_16_31", Signal.Types.ParamInt(1);
       "ENABLE_PCPI", Signal.Types.ParamInt(0);
-      "ENABLE_MUL", Signal.Types.ParamInt(0);
-      "ENABLE_IRQ", Signal.Types.ParamInt(0);
+      "ENABLE_MUL", Signal.Types.ParamInt(1);
+      "ENABLE_IRQ", Signal.Types.ParamInt(1);
       "ENABLE_IRQ_QREGS", Signal.Types.ParamInt(1);
       "ENABLE_IRQ_TIMER", Signal.Types.ParamInt(1);
-      "irqregs_offset", Signal.Types.ParamInt(0);
-      "regindex_bits", Signal.Types.ParamInt(0);
+      "irqregs_offset", Signal.Types.ParamInt(irqregs_offset);
+      "regindex_bits", Signal.Types.ParamInt(regindex_bits);
     ]
-
-  let wrap i = 
-
-    let o = Signal.Instantiation.inst "picorv32_instruction_decoder"
-      generics
-      I.(to_list @@ map2 (fun (n,_) s -> n, s) t i)
-      O'.(to_list t)
-    in
-
-    let module X = Interface.Inst(I)(O) in
-    let x = conv_o @@ X.make "opicorv32_decoder" i in
-
-    let compare x y = 
-      let c = (x ^: o#o y) -- ("compare_" ^ y) in
-      c ^: x 
-    in
-    O'.(map2 (fun (n,b) c -> compare c n) t x)
 
 end
 
@@ -510,7 +496,9 @@ module Alu = struct
   end
   module O' = O
 
-  let conv_i' i' = 
+  let generics = []
+
+  let convi i' = 
     let i'a = I'.(to_list @@ map2 (fun (n,b) s -> n,s) t i') in
     let instr = concat @@ List.rev @@ Array.to_list @@ Array.init Instr.n 
       (fun i -> try List.assoc Instr.(cname (Enum_t.to_enum i)) i'a with _ -> gnd) 
@@ -518,22 +506,9 @@ module Alu = struct
     let is = concat @@ List.rev @@ Array.to_list @@ Array.init Is.n 
       (fun i -> try List.assoc Is.(cname (Enum_t.to_enum i)) i'a with _ -> gnd) 
     in
-    I.({ instr; is; reg_op1 = i'.reg_op1; reg_op2 = i'.reg_op2 })
+    I.({ instr; is; reg_op1 = i'.I'.reg_op1; reg_op2 = i'.I'.reg_op2 })
 
-  let wrap i' = 
-
-    let o = Signal.Instantiation.inst "picorv32_alu" [] 
-      I'.(to_list @@ map2 (fun (n,b) s -> n,s) t i')
-      O.(to_list t)
-    in
-
-    let module X = Interface.Inst(I)(O) in
-    let x = X.make "opicorv32_alu" (conv_i' i') in
-    let compare x y = 
-      let c = (x ^: o#o y) -- ("compare_" ^ y) in
-      c ^: x 
-    in
-    O.(map2 (fun (n,b) c -> compare c n) t x)
+  let convo o = o
 
 end
 
@@ -600,11 +575,14 @@ module Memif = struct
         mux i.reg_op1.[1:0] (List.map (consti 4) [1;2;4;8]);
       ]
     in
-    let mem_rdata_word = mux i.mem_wordsize
+    let mem_rdata_word = 
+      let u32 x = uresize x 32 in
+      mux i.mem_wordsize
       [
         i.mem_rdata;
-        mux i.reg_op1.[1:1] [uresize i.mem_rdata.[15:0] 32; uresize i.mem_rdata.[31:16] 32];
-        mux i.reg_op1.[1:0] (List.map (fun n -> uresize i.mem_rdata.[n+7:n] 32) [0;8;16;23]);
+        mux i.reg_op1.[1:1] [u32 i.mem_rdata.[15:0]; u32 i.mem_rdata.[31:16]];
+        mux i.reg_op1.[1:0] (Array.to_list @@ Array.init 4 
+                                (fun j -> u32 i.mem_rdata.[(j*8)+7:(j*8)]))
       ]
     in
 
@@ -657,48 +635,49 @@ module Memif = struct
       mem_la_read; mem_la_write; mem_la_addr; mem_la_wdata; mem_la_wstrb;
     })
 
-  let wrap i = 
-
-    let o = Signal.Instantiation.inst "picorv32_memif" [] 
-      I.(to_list @@ map2 (fun (n,b) s -> n,s) t i)
-      O.(to_list t)
-    in
-
-    let module X = Interface.Inst(I)(O) in
-    let x = X.make "opicorv32_memif" i in
-    let compare x y = 
-      let c = (x ^: o#o y) -- ("compare_" ^ y) in
-      c ^: x 
-    in
-    O.(map2 (fun (n,b) c -> compare c n) t x)
+  let generics = []
+  let convi i = i
+  let convo o = o
 
 end
 
 module Pcpi = struct
 
-  module I = interface
-    clk[1] resetn[1]
+  module I_ = interface
     valid[1] insn[32] rs1[32] rs2[32]
   end
+  module I = struct
+    include I_
+    let t = map (fun (n,b) -> "pcpi_" ^ n,b) t
+  end
 
-  module O = interface
+  module O_ = interface
     wr[1] rd[32] wait_[1] ready[1]
+  end
+  module O = struct
+    include O_
+    let t = map (function "wait_",b -> "pcpi_wait", b | n,b -> "pcpi_" ^ n,b) t
   end
 
 end
 
 module Mul = struct
   
-  module I = Pcpi.I
+  module I = interface
+    clk[1] resetn[1]
+    (i : Pcpi.I)
+  end
   module O = Pcpi.O
   
   let f i = 
     let open I in
+    let open Pcpi.I in
     let module Regs = Regs(struct let clk=i.clk let resetn=i.resetn end) in
     let open Regs in
 
+    let i', i = i, i.i in
     let sel = 
-      i.resetn &: i.valid &: (i.insn.[6:0] ==:. 0b0110011) &: (i.insn.[31:25] ==:. 0b0000001)
+      i'.resetn &: i.valid &: (i.insn.[6:0] ==:. 0b0110011) &: (i.insn.[31:25] ==:. 0b0000001)
     in
     let mul    = reg ~c:gnd ~e:vdd ~d:(sel &: (i.insn.[14:12] ==:. 0)) in
     let mulh   = reg ~c:gnd ~e:vdd ~d:(sel &: (i.insn.[14:12] ==:. 1)) in
@@ -779,38 +758,34 @@ module Mul = struct
   module I' = I
   module O' = O
 
-  let wrap i = 
-
-    let o = Signal.Instantiation.inst "picorv32_mul" [] 
-      I.(to_list @@ map2 (fun (n,b) s -> n,s) t i)
-      O.(to_list t)
-    in
-
-    let module X = Interface.Inst(I)(O) in
-    let x = X.make "opicorv32_mul" i in
-    let compare x y = 
-      let c = (x ^: o#o y) -- ("compare_" ^ y) in
-      c ^: x 
-    in
-    O.(map2 (fun (n,b) c -> compare c n) t x)
+  let generics = []
+  let convi i = i
+  let convo o = o
 
 end
 
 module Pcpi_if = struct
 
   module I = interface
+    clk[1] resetn[1]
     (i : Pcpi.I)
     (o : Pcpi.O)
   end
 
-  module O = Pcpi.O
+  (*module O = Pcpi.O*)
+  module O = struct
+    include Pcpi.O
+    let t = map (fun (n,b) -> ("pcpi_int_" ^ String.sub n 5 (String.length n - 5)), b) t
+  end
 
   let f i = 
     let open I in
     let open Pcpi.O in
+    let module Regs = Regs(struct let clk=i.clk let resetn=i.resetn end) in
+    let open Regs in
 
     let z = Pcpi.O.(map (fun (_,b) -> zero b) t) in 
-    let mul = if Options.enable_mul then Mul.f i.i else z in
+    let mul = if Options.enable_mul then Mul.f Mul.I.({clk=i.clk; resetn=i.resetn; i=i.i}) else z in
 
     let en_pcpi = cbool Options.enable_pcpi in
     let en_mul = cbool Options.enable_mul in
@@ -826,7 +801,12 @@ module Pcpi_if = struct
   module I' = I
   module O' = O
 
-  let wrap = f (* XXX *)
+  let generics = [
+    "ENABLE_PCPI", Signal.Types.ParamInt(0); 
+    "ENABLE_MUL", Signal.Types.ParamInt(1);
+  ]
+  let convi i = i
+  let convo o = o
 
 end
 
@@ -860,20 +840,9 @@ module Rf = struct
   module I' = I
   module O' = O
 
-  let wrap i = 
-
-    let o = Signal.Instantiation.inst "picorv32_rf" [] 
-      I.(to_list @@ map2 (fun (n,b) s -> n,s) t i)
-      O.(to_list t)
-    in
-
-    let module X = Interface.Inst(I)(O) in
-    let x = X.make "opicorv32_rf" i in
-    let compare x y = 
-      let c = (x ^: o#o y) -- ("compare_" ^ y) in
-      c ^: x 
-    in
-    O.(map2 (fun (n,b) c -> compare c n) t x)
+  let generics = []
+  let convi i = i
+  let convo o = o
 
 end
 
@@ -898,7 +867,17 @@ module Control = struct
     pcpi_valid[1]
     decoder_trigger[1] decoder_trigger_q[1] decoder_pseudo_trigger[1]
     eoi[32]
+    ascii_state[16*8]
   end
+
+  type cpu_state = [ `fetch | `trap | `ld_rs1 | `ld_rs2 | `exec | `shift | `stmem | `ldmem ]
+    deriving(Show)
+
+  let bits_of_string s = 
+    uresize
+      (concat @@ Array.to_list @@
+        Array.init (String.length s) (fun i -> consti 8 (Char.code s.[i])))
+      (16*8)
 
   let f i = 
     let open I in
@@ -915,8 +894,8 @@ module Control = struct
     let enable_regs_dualport = cbool Options.enable_regs_dualport in
     
     let is_cpu, sm_cpu, next_cpu = 
-      Signal.Statemachine.statemachine (r_spec gnd) vdd 
-        [ `trap; `fetch; `ld_rs1; `ld_rs2; `exec; `shift; `stmem; `ldmem ]
+      Signal.Statemachine.statemachine (r_spec (zero 3)) vdd 
+        [ `fetch; `trap; `ld_rs1; `ld_rs2; `exec; `shift; `stmem; `ldmem ]
     in
 
     let regn n = g_reg ~c:(zero n) ~e:vdd ~n in
@@ -925,31 +904,8 @@ module Control = struct
     let reg32 () = regn 32 in
     let reg64 () = regn 64 in
 
-    let ro = O.(map (fun (_,b) -> g_reg ~c:(zero b) ~e:vdd ~n:b) t) in
+    let ro = O.(map (fun (_,b) -> regn b) t) in
 
-    let pcpi_timeout = 
-      if with_pcpi then 
-        let timeout = g_reg ~c:gnd ~e:vdd ~n:1 in
-        let counter = g_reg ~c:(ones 4) ~e:vdd ~n:4 in
-        let () = 
-          Signal.Guarded.(compile [
-            g_if (ro.pcpi_valid#q &: (~: (i.pcpi_int_wait))) [
-              g_when (counter#q <>:. 0) 
-                [ counter $== counter#q -:. 1 ] 
-            ] [ 
-              counter $==. (-1) 
-            ];
-            timeout $== (counter#q ==:. 0)
-          ])
-        in timeout#q
-      else gnd
-    in
-
-    let count_cycle = 
-      if not Options.enable_counters then zero 64
-      else reg_fb ~c:(zero 64) ~e:vdd ~w:64 (fun d -> d +:. 1)
-    in
- 
     (* register file *)
     let latched_rd = g_reg ~c:(zero regindex_bits) ~e:vdd ~n:regindex_bits in
     let rf_wr, rf_d = Signal.Guarded.(g_wire gnd, g_wire (zero 32)) in
@@ -975,27 +931,35 @@ module Control = struct
                              instr=i.instr; is=i.is }) in
 
     (* statemachine *)
-    let opt b f = Signal.Guarded.(if b then g_proc f else g_proc []) in
-
-    let do_waitirq = reg1 () in
-
-    let count_instr = reg64() in
+    let pcpi_timeout = reg1() in
+    let pcpi_timeout_counter = regn 4 in
+    let do_waitirq = reg1() in
+    let count_cycle, count_instr = reg64(), reg64() in
     let latched_store, latched_stalu, latched_branch = reg1(), reg1(), reg1() in
     let latched_is_lu, latched_is_lh, latched_is_lb = reg1(), reg1(), reg1() in
-    let reg_pc, reg_next_pc, reg_out, reg_alu_out = reg32(), reg32(), reg32(), reg32() in
-    let reg_sh = reg5 () in
+    let reg_pc, reg_next_pc = 
+      let mk() = g_reg ~c:Options.progaddr_reset ~e:vdd ~n:32 in
+      mk(), mk()
+    in
+    let current_pc = Signal.Guarded.g_wire (zero 32) in
+    let reg_out, reg_alu_out = reg32(), reg32() in
+    let reg_sh = reg5() in
+
+    let concat_array a = concat @@ List.rev @@ List.map (fun x -> x#q) @@ Array.to_list a in
 
     let irq_state = g_reg ~c:(zero 2) ~e:vdd ~n:2 in
     let irq_active = reg1 () in
     let irq_pending = reg32 () in
-    let irq_mask = Array.init 32 (fun _ -> reg1 ()) in
-    let irq_mask_vec = concat @@ List.rev @@ List.map (fun x -> x#q) @@ Array.to_list irq_mask in
+    let next_irq_pending = Array.init 32 (fun j -> Signal.Guarded.g_wire gnd) in
+    let next_irq_pending_vec = concat_array next_irq_pending in
+    let irq_mask = Array.init 32 (fun _ -> g_reg ~c:vdd ~e:vdd ~n:1) in
+    let irq_mask_vec = concat_array irq_mask in
+
+    let set_mem_do_rinst, set_mem_do_rdata, set_mem_do_wdata = 
+      Signal.Guarded.(g_wire gnd, g_wire gnd, g_wire gnd)
+    in
 
     let timer = reg32 () in
-
-    (* XXX TODO XXX *)
-    let current_pc = zero 32 in
-    (* XXXXXXXXXXXXXXXXXXXXXX *)
 
     let instr x = Instr.sel i.instr x in
     let is x = Is.sel i.is x in
@@ -1007,26 +971,28 @@ module Control = struct
       ro.mem_do_rinst $== ((~: (ro.decoder_trigger#q)) &: (~: (do_waitirq#q)));
       ro.mem_wordsize $==. 0;
 
-      (*current_pc $== reg_next_pc;*)
+      current_pc $== reg_next_pc#q;
 
       g_if latched_branch#q [
-        (*current_pc = latched_store ? (latched_stalu ? reg_alu_out : reg_out) : reg_next_pc;*)
+        current_pc $== mux2 latched_store#q 
+          (mux2 latched_stalu#q reg_alu_out#q reg_out#q) 
+          reg_next_pc#q;
         write_rf (reg_pc#q +:. 4);
       ] @@ g_elif latched_store#q [
         write_rf (mux2 latched_stalu#q reg_alu_out#q reg_out#q);
       ] @@ g_elif (enable_irq &: irq_state#q.[0:0]) [
-        write_rf current_pc;
-        (*current_pc = PROGADDR_IRQ;*)
+        write_rf reg_next_pc#q; (* == current_pc at this point *)
+        current_pc $== Options.progaddr_irq;
         irq_active $==. 1;
         ro.mem_do_rinst $==. 1;
       ] @@ g_elif (enable_irq &: irq_state#q.[1:1]) [
         ro.eoi $== (irq_pending#q &: (~: irq_mask_vec));
         write_rf (irq_pending#q &: (~: irq_mask_vec));
-        (*next_irq_pending = next_irq_pending & irq_mask;*)
+        irq_pending $== (next_irq_pending_vec &: irq_mask_vec); (* XXX CHANGED *)
       ] [];
 
-      reg_pc $== current_pc;
-      reg_next_pc $== current_pc;
+      reg_pc $== current_pc#q;
+      reg_next_pc $== current_pc#q;
 
       latched_store $==. 0;
       latched_stalu $==. 0;
@@ -1039,12 +1005,14 @@ module Control = struct
       g_if (enable_irq &: 
             ((ro.decoder_trigger#q &: (~: (irq_active#q)) &: 
              reduce (|:) (bits (irq_pending#q &: (~: irq_mask_vec)))) |: 
-             irq_state#q)) [
+             (reduce (|:) @@ bits irq_state#q))) [
           irq_state $==
             mux2 (irq_state#q ==:. 0b00) (consti 2 0b01) @@
             mux2 (irq_state#q ==:. 0b01) (consti 2 0b10) (consti 2 0b00);
           g_if (enable_irq_qregs) [
-            latched_rd $== ((consti regindex_bits irqregs_offset) |: irq_state#q.[0:0]);
+            latched_rd $== 
+              ((consti regindex_bits irqregs_offset) |: 
+               (uresize irq_state#q.[0:0] regindex_bits));
           ] [ 
             g_if irq_state#q.[0:0] [ latched_rd $==. 4 ] [ latched_rd $==. 3 ]
           ]
@@ -1052,17 +1020,17 @@ module Control = struct
         g_if irq_pending#q [
           latched_store $==. 1;
           reg_out $== irq_pending#q;
-          reg_next_pc $== current_pc +:. 4;
+          reg_next_pc $== current_pc#q +:. 4;
           ro.mem_do_rinst $==. 1;
         ] [
           do_waitirq $==. 1;
         ]
       ] @@ g_elif ro.decoder_trigger#q [
-          reg_next_pc $== current_pc +:. 4;
+          reg_next_pc $== current_pc#q +:. 4;
           g_when (enable_counters) [ count_instr $== count_instr#q +:. 1; ];
           g_if (instr Instr.Jal) [
             ro.mem_do_rinst $==. 1;
-            reg_next_pc $== current_pc +: i.decoded_imm_uj;
+            reg_next_pc $== current_pc#q +: i.decoded_imm_uj;
             latched_branch $==. 1;
           ] [
             ro.mem_do_rinst $==. 0;
@@ -1072,8 +1040,8 @@ module Control = struct
       ] []
     ]) in
 
-    let z_rs1 = mux2 i.decoded_rs1 rfo.Rf.O.q1 (zero 32) in
-    let z_rs2 = mux2 i.decoded_rs2 rfo.Rf.O.q2 (zero 32) in
+    let z_rs1 = mux2 (i.decoded_rs1 <>:. 0) rfo.Rf.O.q1 (zero 32) in
+    let z_rs2 = mux2 (i.decoded_rs2 <>:. 0) rfo.Rf.O.q2 (zero 32) in
 
     let ld_rs1 = `ld_rs1, Signal.Guarded.([
 
@@ -1085,7 +1053,7 @@ module Control = struct
           ro.reg_op1 $== z_rs1;
           g_if (enable_regs_dualport) [
             ro.pcpi_valid $==. 1;
-            reg_sh $== z_rs2;
+            reg_sh $== uresize z_rs2 5;
             ro.reg_op2 $== z_rs2;
             g_if (i.pcpi_int_ready) [
               ro.mem_do_rinst $==. 1;
@@ -1093,9 +1061,9 @@ module Control = struct
               reg_out $== i.pcpi_int_rd;
               latched_store $== i.pcpi_int_wr;
               next_cpu `fetch;
-            ] @@ g_elif (pcpi_timeout) [
+            ] @@ g_elif (pcpi_timeout#q) [
               g_if (enable_irq &: (~: (irq_mask.(irq_sbreak)#q)) &: (~: (irq_active#q))) [
-                (*next_irq_pending[irq_sbreak] = 1;*)
+                next_irq_pending.(irq_sbreak) $==. 1;
                 next_cpu `fetch;
               ] [
                 next_cpu `trap;
@@ -1106,7 +1074,7 @@ module Control = struct
           ]
         ] [
           g_if (enable_irq &: (~: (irq_mask.(irq_sbreak)#q)) &: (~: (irq_active#q))) [
-            (*next_irq_pending[irq_sbreak] = 1;*)
+            next_irq_pending.(irq_sbreak) $==. 1;
             next_cpu `fetch;
           ] [
             next_cpu `trap;
@@ -1114,8 +1082,8 @@ module Control = struct
         ]
       ] @@ g_elif (is Is.Rdcycle_rdcycleh_rdinstr_rdinstrh) [
         reg_out $== (pmux1ht [
-          instr Instr.Rdcycle, count_cycle.[31:0];
-          instr Instr.Rdcycleh, count_cycle.[63:32];
+          instr Instr.Rdcycle, count_cycle#q.[31:0];
+          instr Instr.Rdcycleh, count_cycle#q.[63:32];
           instr Instr.Rdinstr, count_instr#q.[31:0];
           instr Instr.Rdinstrh, count_instr#q.[63:32];
         ]);
@@ -1153,22 +1121,22 @@ module Control = struct
         latched_store $==. 1;
         reg_out $== timer#q;
         timer $== z_rs1;
-        next_cpu `fetch;
+        next_cpu `fetch; 
       ] [
         ro.reg_op1 $== z_rs1;
         g_if (is Is.Lb_lh_lw_lbu_lhu) [
           next_cpu `ldmem;
           ro.mem_do_rinst $==. 1;
         ] @@ g_elif (is Is.Slli_srli_srai) [
-          reg_sh $== i.decoded_rs2;
+          reg_sh $== uresize i.decoded_rs2 5;
           next_cpu `shift;
         ] @@ g_elif (is Is.Jalr_addi_slti_sltiu_xori_ori_andi) [
           ro.reg_op2 $== i.decoded_imm;
           ro.mem_do_rinst $== ro.mem_do_prefetch#q;
           next_cpu `exec;
         ] @@ g_elif (enable_regs_dualport) [
-          reg_sh $== z_rs2;
-          ro.reg_op2 $== z_rs1;
+          reg_sh $== uresize z_rs2 5;
+          ro.reg_op2 $== z_rs2;
           g_if (is Is.Sb_sh_sw) [
             next_cpu `stmem;
             ro.mem_do_rinst $==. 1;
@@ -1187,7 +1155,7 @@ module Control = struct
 
     let ld_rs2 = `ld_rs2, Signal.Guarded.([
     
-      reg_sh $== z_rs2;
+      reg_sh $== uresize z_rs2 5;
       ro.reg_op2 $== z_rs2;
 
       g_if (cbool with_pcpi &: instr Instr.Trap) [
@@ -1198,9 +1166,9 @@ module Control = struct
           reg_out $== i.pcpi_int_rd;
           latched_store $== i.pcpi_int_wr;
           next_cpu `fetch;
-        ] @@ g_elif (pcpi_timeout) [
+        ] @@ g_elif (pcpi_timeout#q) [
           g_if (enable_irq &: (~: (irq_mask.(irq_sbreak)#q)) &: (~: (irq_active#q))) [
-            (*next_irq_pending[irq_sbreak] = 1;*)
+            next_irq_pending.(irq_sbreak) $==. 1;
             next_cpu `fetch;
           ] [
             next_cpu `trap;
@@ -1229,7 +1197,7 @@ module Control = struct
         ];
         g_when (alu.Alu.O.alu_out_0) [
           ro.decoder_trigger $==. 0;
-          (*set_mem_do_rinst = 1;*)
+          set_mem_do_rinst $==. 1;
         ]
       ] [
         latched_branch $== instr Instr.Jalr;
@@ -1271,7 +1239,7 @@ module Control = struct
             instr Instr.Sw, consti 2 0;
           ];
           ro.reg_op1 $== ro.reg_op1#q +: i.decoded_imm;
-          (*set_mem_do_wdata = 1;*)
+          set_mem_do_wdata $==. 1;
         ];
         g_when ((~: (ro.mem_do_prefetch#q)) &: i.mem_done) [
           next_cpu `fetch;
@@ -1294,7 +1262,7 @@ module Control = struct
           latched_is_lh $== instr Instr.Lh;
           latched_is_lb $== instr Instr.Lb;
           ro.reg_op1 $== ro.reg_op1#q +: i.decoded_imm;
-          (*set_mem_do_rdata = 1;*)
+          set_mem_do_rdata $==. 1;
         ];
         g_when ((~: (ro.mem_do_prefetch#q)) &: i.mem_done) [
           reg_out $== pmux1ht [
@@ -1309,7 +1277,282 @@ module Control = struct
       ]
     ]) in
 
-    ()
+    let () = Signal.Guarded.(compile [
+     
+      ro.trap $==. 0;
+      reg_sh $==. 0;
+      reg_out $==. 0;
+      reg_alu_out $== alu.Alu.O.alu_out;
+
+      (* XXX this is quite different to the original implementation *)
+      g_proc (Array.to_list @@ Array.init 32 (fun j -> 
+        next_irq_pending.(j) $== 
+          ((irq_pending#q.[j:j] &: Options.latched_irq.[j:j]) |: i.irq.[j:j])));
+      irq_pending $== next_irq_pending_vec;
+
+      g_proc (if with_pcpi then [
+        g_if (ro.pcpi_valid#q &: (~: (i.pcpi_int_wait))) [
+          g_when (pcpi_timeout_counter#q) [
+            pcpi_timeout_counter $== pcpi_timeout_counter#q -:. 1;
+          ]
+        ] [
+          pcpi_timeout_counter $==. (-1);
+        ];
+        pcpi_timeout $== (pcpi_timeout_counter#q ==:. 0);
+      ] else [
+        pcpi_timeout $==. 0;
+        pcpi_timeout_counter $==. 0;
+      ]);
+
+      g_proc (if Options.enable_counters then [ count_cycle $== (count_cycle#q -- "count_cycle") +:. 1 ] 
+                                         else [ count_cycle $==. 0 ]);
+
+      g_when (enable_irq &: enable_irq_timer &: (timer#q <>:. 0)) [ 
+        g_when ((timer#q -:. 1) ==:. 0) [
+          next_irq_pending.(irq_timer) $==. 1;
+        ];
+        timer $== timer#q -:. 1;
+      ];
+
+      ro.decoder_trigger_q $== ro.decoder_trigger#q;
+      ro.decoder_trigger $== (ro.mem_do_rinst#q &: i.mem_done);
+      ro.decoder_pseudo_trigger $==. 0;
+      do_waitirq $==. 0;
+
+      sm_cpu [
+        trap;
+        fetch;
+        ld_rs1;
+        ld_rs2;
+        exec;
+        shift;
+        stmem;
+        ldmem;
+      ];
+
+      g_when i.mem_done [
+        ro.mem_do_prefetch $==. 0;
+        ro.mem_do_rinst $==. 0;
+        ro.mem_do_rdata $==. 0;
+        ro.mem_do_wdata $==. 0;
+      ];
+
+      g_when (set_mem_do_rinst#q) [ ro.mem_do_rinst $==. 1 ];
+      g_when (set_mem_do_rdata#q) [ ro.mem_do_rdata $==. 1 ];
+      g_when (set_mem_do_wdata#q) [ ro.mem_do_wdata $==. 1 ];
+        
+    ]) in
+
+    O.({ map (fun s -> s#q) ro with 
+          next_pc = mux2 (latched_store#q &: latched_branch#q) reg_out#q reg_next_pc#q;
+          ascii_state = (pmux [
+            is_cpu `trap  , bits_of_string "trap  ";
+            is_cpu `fetch , bits_of_string "fetch ";
+            is_cpu `ld_rs1, bits_of_string "ld_rs1";
+            is_cpu `ld_rs2, bits_of_string "ld_rs2";
+            is_cpu `exec  , bits_of_string "exec  ";
+            is_cpu `shift , bits_of_string "shift ";
+            is_cpu `stmem , bits_of_string "stmem ";
+            is_cpu `ldmem , bits_of_string "ldmem ";
+          ] (bits_of_string "none?")) -- "ascii_state";
+      })
+
+  module I' = interface
+    instr_lui[1] instr_auipc[1] instr_jal[1] instr_jalr[1]
+    instr_beq[1] instr_bne[1] instr_blt[1] instr_bge[1] instr_bltu[1] instr_bgeu[1]
+    instr_lb[1] instr_lh[1] instr_lw[1] instr_lbu[1] instr_lhu[1] 
+    instr_sb[1] instr_sh[1] instr_sw[1]
+    instr_addi[1] instr_slti[1] instr_sltiu[1] instr_xori[1] 
+    instr_ori[1] instr_andi[1] instr_slli[1] 
+    instr_srli[1] instr_srai[1] instr_add[1] 
+    instr_sub[1] instr_sll[1] instr_slt[1] instr_sltu[1] 
+    instr_xor[1] instr_srl[1] instr_sra[1] instr_or[1] 
+    instr_and[1] instr_rdcycle[1] instr_rdcycleh[1] 
+    instr_rdinstr[1] instr_rdinstrh[1] instr_getq[1] 
+    instr_setq[1] instr_retirq[1] instr_maskirq[1] 
+    instr_waitirq[1] instr_timer[1] instr_trap[1]
+    is_lui_auipc_jal[1] is_lb_lh_lw_lbu_lhu[1] is_slli_srli_srai[1]
+    is_jalr_addi_slti_sltiu_xori_ori_andi[1] is_sb_sh_sw[1] is_sll_srl_sra[1]
+    is_lui_auipc_jal_jalr_addi_add[1] is_slti_blt_slt[1] is_sltiu_bltu_sltu[1]
+    is_beq_bne_blt_bge_bltu_bgeu[1] is_lbu_lhu_lw[1] is_alu_reg_imm[1]
+    is_alu_reg_reg[1] is_compare[1]
+    is_rdcycle_rdcycleh_rdinstr_rdinstrh[1]
+    clk[1] resetn[1]
+    mem_rdata_word[32] mem_done[1]
+    pcpi_int_ready[1] pcpi_int_wait[1]
+    pcpi_int_wr[1] pcpi_int_rd[32]
+    decoded_rd[regindex_bits] decoded_rs1[regindex_bits] decoded_rs2[regindex_bits]
+    decoded_imm[32] decoded_imm_uj[32]
+    irq[32]
+  end
+  module O' = O
+  let generics = [
+    "ENABLE_COUNTERS", Signal.Types.ParamInt(1);
+    "ENABLE_REGS_16_31", Signal.Types.ParamInt(1);
+    "ENABLE_REGS_DUALPORT", Signal.Types.ParamInt(1);
+    "LATCHED_MEM_RDATA", Signal.Types.ParamInt(0);
+    "ENABLE_PCPI", Signal.Types.ParamInt(0);
+    "ENABLE_MUL", Signal.Types.ParamInt(1);
+    "ENABLE_IRQ", Signal.Types.ParamInt(1);
+    "ENABLE_IRQ_QREGS", Signal.Types.ParamInt(1);
+    "ENABLE_IRQ_TIMER", Signal.Types.ParamInt(1);
+    "MASKED_IRQ", Signal.Types.ParamInt(0);
+    "LATCHED_IRQ", Signal.Types.ParamInt(-1);
+    "PROGADDR_RESET", Signal.Types.ParamInt(0);
+    "PROGADDR_IRQ", Signal.Types.ParamInt(16);
+    "irqregs_offset", Signal.Types.ParamInt(irqregs_offset);
+    "regfile_size", Signal.Types.ParamInt(regfile_size);
+    "regindex_bits", Signal.Types.ParamInt(regindex_bits);
+  ]
+  let convi i' = 
+    let i'a = I'.(to_list @@ map2 (fun (n,b) s -> n,s) t i') in
+    let instr = concat @@ List.rev @@ Array.to_list @@ Array.init Instr.n 
+      (fun i -> try List.assoc Instr.(cname (Enum_t.to_enum i)) i'a with _ -> gnd) 
+    in
+    let is = concat @@ List.rev @@ Array.to_list @@ Array.init Is.n 
+      (fun i -> try List.assoc Is.(cname (Enum_t.to_enum i)) i'a with _ -> gnd) 
+    in
+    I.({ 
+      instr; is; 
+      clk = i'.I'.clk;
+      resetn = i'.I'.resetn;
+      mem_rdata_word = i'.I'.mem_rdata_word;
+      mem_done = i'.I'.mem_done;
+      pcpi_int_ready = i'.I'.pcpi_int_ready;
+      pcpi_int_wait = i'.I'.pcpi_int_wait;
+      pcpi_int_wr = i'.I'.pcpi_int_wr;
+      pcpi_int_rd = i'.I'.pcpi_int_rd;
+      decoded_rd = i'.I'.decoded_rd;
+      decoded_rs1 = i'.I'.decoded_rs1;
+      decoded_rs2 = i'.I'.decoded_rs2;
+      decoded_imm = i'.I'.decoded_imm;
+      decoded_imm_uj = i'.I'.decoded_imm_uj;
+      irq = i'.I'.irq;
+    })
+
+  let convo o = o
+
+end
+
+module PicoRV32 = struct
+
+  module I = interface
+    clk[1] resetn[1]
+    mem_ready[1] mem_rdata[32]
+    pcpi_wr[1] pcpi_rd[32] pcpi_wait[1] pcpi_ready[1]
+    irq[32]
+  end
+
+  module O = interface
+    trap[1]
+    mem_valid[1] mem_instr[1] mem_addr[32] mem_wdata[32] mem_wstrb[4]
+    mem_la_read[1] mem_la_write[1] mem_la_addr[32] mem_la_wdata[32] mem_la_wstrb[4]
+    pcpi_valid[1] pcpi_insn[32] pcpi_rs1[32] pcpi_rs2[32]
+    eoi[32]
+  end
+
+  let f i = 
+
+    let pif = Pcpi_if.O.(map (fun (n,b) -> wire b) t) in
+    let dec = Decoder.O.(map (fun (n,b) -> wire b) t) in
+    let mem = Memif.O.(map (fun (n,b) -> wire b) t) in
+    let ctl = Control.O.(map (fun (n,b) -> wire b) t) in
+
+    let pif' = Pcpi_if.f
+      Pcpi_if.I.({
+        clk=i.I.clk; resetn=i.I.resetn;
+        i=Pcpi.I.({
+          valid = ctl.Control.O.pcpi_valid;
+          insn = dec.Decoder.O.pcpi_insn;
+          rs1 = ctl.Control.O.reg_op1;
+          rs2 = ctl.Control.O.reg_op2;
+        });
+        o=Pcpi.O.({
+          wr = i.I.pcpi_wr;
+          rd = i.I.pcpi_rd;
+          wait_ = i.I.pcpi_wait;
+          ready = i.I.pcpi_ready;
+        });
+      });
+    in
+
+    let dec' = Decoder.f
+      Decoder.I.({
+        clk=i.I.clk; resetn=i.I.resetn;
+        mem_do_rinst = ctl.Control.O.mem_do_rinst;
+        mem_done = mem.Memif.O.mem_done;
+        mem_rdata_latched = mem.Memif.O.mem_rdata_latched; 
+        mem_rdata_q = mem.Memif.O.mem_rdata_q;
+        decoder_trigger = ctl.Control.O.decoder_trigger;
+        decoder_pseudo_trigger = ctl.Control.O.decoder_pseudo_trigger;
+      })
+    in
+
+    let mem' = Memif.f
+      Memif.I.({
+        clk=i.I.clk; resetn=i.I.resetn;
+        reg_op1 = ctl.Control.O.reg_op1;
+        reg_op2 = ctl.Control.O.reg_op2;
+        next_pc = ctl.Control.O.next_pc;
+        mem_ready = i.I.mem_ready;
+        mem_do_rinst = ctl.Control.O.mem_do_rinst;
+        mem_rdata = i.I.mem_rdata;
+        mem_wordsize = ctl.Control.O.mem_wordsize;
+        mem_do_prefetch = ctl.Control.O.mem_do_prefetch;
+        mem_do_rdata = ctl.Control.O.mem_do_rdata;
+        mem_do_wdata = ctl.Control.O.mem_do_wdata;
+      })
+    in
+
+    let ctl' = Control.f
+      Control.I.({
+        clk=i.I.clk; resetn=i.I.resetn;
+        instr = dec.Decoder.O.instr;
+        is = dec.Decoder.O.is;
+        mem_rdata_word = mem.Memif.O.mem_rdata_word;
+        mem_done = mem.Memif.O.mem_done;
+        pcpi_int_ready = pif.Pcpi_if.O.ready;
+        pcpi_int_wait = pif.Pcpi_if.O.wait_;
+        pcpi_int_wr = pif.Pcpi_if.O.wr;
+        pcpi_int_rd = pif.Pcpi_if.O.rd;
+        decoded_rd = dec.Decoder.O.decoded_rd;
+        decoded_rs1 = dec.Decoder.O.decoded_rs1;
+        decoded_rs2 = dec.Decoder.O.decoded_rs2;
+        decoded_imm = dec.Decoder.O.decoded_imm;
+        decoded_imm_uj = dec.Decoder.O.decoded_imm_uj;
+        irq = i.I.irq;
+      })
+    in
+
+    let _ = Pcpi_if.O.(map2 (fun a b -> a <== b) pif pif') in
+    let _ = Decoder.O.(map2 (fun a b -> a <== b) dec dec') in
+    let _ = Memif.O.(map2 (fun a b -> a <== b) mem mem') in
+    let _ = Control.O.(map2 (fun a b -> a <== b) ctl ctl') in
+
+    O.({
+      trap = ctl.Control.O.trap;
+      mem_valid = mem.Memif.O.mem_valid;
+      mem_instr = mem.Memif.O.mem_instr;
+      mem_addr = mem.Memif.O.mem_addr;
+      mem_wdata = mem.Memif.O.mem_wdata;
+      mem_wstrb = mem.Memif.O.mem_wstrb;
+      mem_la_read = mem.Memif.O.mem_la_read;
+      mem_la_write = mem.Memif.O.mem_la_write;
+      mem_la_addr = mem.Memif.O.mem_la_addr;
+      mem_la_wdata = mem.Memif.O.mem_la_wdata;
+      mem_la_wstrb = mem.Memif.O.mem_la_wstrb;
+      pcpi_valid = ctl.Control.O.pcpi_valid;
+      pcpi_insn = dec.Decoder.O.pcpi_insn;
+      pcpi_rs1 = ctl.Control.O.reg_op1;
+      pcpi_rs2 = ctl.Control.O.reg_op2;
+      eoi = ctl.Control.O.eoi;
+    })
+ 
+  module I' = I
+  module O' = O
+  let generics = []
+  let convi i = i
+  let convo o = o
 
 end
 
@@ -1321,11 +1564,29 @@ module Test = struct
     module I' : Interface.S
     module O' : Interface.S
     val f : Signal.Comb.t I.t -> Signal.Comb.t O.t
-    val wrap : Signal.Comb.t I'.t -> Signal.Comb.t O'.t
+    val generics : (string * Signal.Types.parameter) list
+    val convi : t I'.t -> t I.t
+    val convo : t O.t -> t O'.t
   end) = struct
 
     module Y = Interface.Circ(X.I)(X.O)
     module Y' = Interface.Circ(X.I')(X.O')
+
+    let wrap name i = 
+      let o = Signal.Instantiation.inst ("picorv32_" ^ name)  
+        X.generics
+        X.I'.(to_list @@ map2 (fun (n,b) s -> n,s) t i)
+        X.O'.(to_list t)
+      in
+      let module Z = Interface.Inst(X.I)(X.O) in
+      let x = X.convo @@ Z.make ("opicorv32_" ^ name) (X.convi i) in
+      let compare x y = 
+        let y' = o#o y in
+        let c = (x ^: y') -- ("compare_" ^ y) in
+        let which = false in (* true: verilog, false: hardcaml *)
+        if which then c ^: x else c ^: y'
+      in
+      X.O'.(map2 (fun (n,b) c -> compare c n) t x)
 
     let write name' = 
       let name = "opicorv32_" ^ name' in
@@ -1336,7 +1597,7 @@ module Test = struct
 
       let name = "opicorv32_" ^ name' ^ "_wrap" in
       let f = open_out (name ^ ".v") in
-      let circ = Y'.make name X.wrap in
+      let circ = Y'.make name (wrap name') in
       Rtl.Verilog.write (output_string f) circ;
       close_out f;
 
@@ -1350,16 +1611,18 @@ module Test = struct
   module Mul = Gen(Mul)
   module Pcpi_if = Gen(Pcpi_if)
   module Rf = Gen(Rf)
-  (*module Control = Gen(Control)*)
+  module Control = Gen(Control)
+  module PicoRV32 = Gen(PicoRV32)
 
   let write_vlog() = 
-    Decoder.write "decoder";
+    Decoder.write "instruction_decoder";
     Alu.write "alu";
     Memif.write "memif";
     Mul.write "mul";
     Rf.write "rf";
-    (*let () = Pcpi_if.write "pcpi_if"*)
-    ()
+    Pcpi_if.write "pcpi_if";
+    Control.write "control";
+    PicoRV32.write "rv32"
 
   (* defines *)
 

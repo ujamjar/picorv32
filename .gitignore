@@ -19,3 +19,4 @@
 /testbench_axi.exe
 /testbench.vcd
 .*.swp
+*~
