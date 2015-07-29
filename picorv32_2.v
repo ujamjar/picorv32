@@ -31,7 +31,7 @@
 //`define HARDCAML_MEMIF_WRAP
 //`define HARDCAML_PCPI_WRAP
 //`define HARDCAML_CONTROL_WRAP
-`define HARDCAML_TOP_WRAP
+//`define HARDCAML_TOP_WRAP
 
 //`define X 'bx
 `define X 'b0

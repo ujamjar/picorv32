@@ -59,6 +59,12 @@ tests/%.o: tests/%.S tests/riscv_test.h tests/test_macros.h
 	$(RVGCC) -c -o $@ -DTEST_FUNC_NAME=$(notdir $(basename $<)) \
 		-DTEST_FUNC_TXT='"$(notdir $(basename $<))"' -DTEST_FUNC_RET=$(notdir $(basename $<))_ret $<
 
+opicorv32:
+	ocamlfind opt -g -o testbench.native \
+		-syntax camlp4o -linkpkg \
+		-package hardcaml,hardcaml.syntax,hardcaml-waveterm.lterm,deriving,deriving.syntax,hardcaml-llvmsim \
+		picorv32.ml testbench.ml	
+
 clean:
 	rm -vrf $(FIRMWARE_OBJS) $(TEST_OBJS) \
 		firmware/firmware.{elf,bin,hex,map} \
